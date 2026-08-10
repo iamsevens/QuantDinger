@@ -95,3 +95,10 @@ backend_api_python/data/memory/
 # Docker
 # ========================
 docker-compose.override.yml
+docker-compose.bsefix.yml
+
+# ========================
+# Local workspace (machine-specific, not for sharing)
+# ========================
+.claude/
+qd-mobile-upstream/
