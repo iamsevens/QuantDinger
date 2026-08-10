@@ -347,6 +347,19 @@ class MarketDataCollector:
                 "source": "tencent_quote",
             }
 
+            # Tier 0: Ticker PG financial snapshot (own read-only data layer)
+            if not is_hk:
+                try:
+                    from app.data_sources.ticker_pg import read_financial
+                    pg = read_financial(code[:2].upper(), code[2:])
+                    if pg:
+                        result["source"] = "tencent_quote+ticker_pg"
+                        for k, v in pg.items():
+                            if v is not None and result.get(k) is None:
+                                result[k] = v
+                except Exception as e:
+                    logger.debug("Ticker PG financial failed %s:%s: %s", market, symbol, e)
+
             # Tier 1: Twelve Data
             td = {}
             try:

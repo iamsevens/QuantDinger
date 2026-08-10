@@ -75,6 +75,26 @@ class CNStockDataSource(BaseDataSource):
                 truncate=(after_time is None),
             )
 
+        # Tier 1.5: Ticker PG (own read-only data layer, daily/weekly)
+        if tf in ("1D", "1W"):
+            try:
+                from app.data_sources.ticker_pg import read_daily_kline_qfq, aggregate_weekly
+                market = code[:2].upper()
+                c6 = code[2:]
+                rows = read_daily_kline_qfq(market, c6, lim, before_time, after_time)
+                if rows:
+                    if tf == "1W":
+                        rows = aggregate_weekly(rows)
+                    return self.filter_and_limit(
+                        rows,
+                        limit=lim,
+                        before_time=before_time,
+                        after_time=after_time,
+                        truncate=(after_time is None),
+                    )
+            except Exception as e:
+                logger.debug("Ticker PG kline failed %s:%s: %s", symbol, tf, e)
+
         # Tier 2: Tencent for daily/weekly (fast, free)
         if tf in ("1D", "1W"):
             tf_map = {"1D": "day", "1W": "week"}
