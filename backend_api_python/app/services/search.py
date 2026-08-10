@@ -602,12 +602,25 @@ class AlphaVantageNewsProvider(BaseSearchProvider):
             return SearchResponse(query=query, results=[], provider=self.name, success=False, error_message=str(e))
 
 
+def _news_proxies() -> Optional[Dict[str, str]]:
+    """
+    Proxy for news/web-search providers that are blocked in mainland CN
+    (DuckDuckGo). Inside Docker, the host's local proxy is reached via
+    host.docker.internal — 127.0.0.1 points at the container itself. Set
+    NEWS_PROXY_URL='' to disable proxying.
+    """
+    raw = (os.getenv("NEWS_PROXY_URL", "http://host.docker.internal:7897") or "").strip()
+    if not raw:
+        return None
+    return {"http": raw, "https": raw}
+
+
 class DuckDuckGoSearchProvider(BaseSearchProvider):
     """DuckDuckGo 搜索引擎（免费，无需 API Key）"""
-    
+
     def __init__(self):
         super().__init__(['free'], "DuckDuckGo")
-    
+
     def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
         """执行 DuckDuckGo 搜索"""
         try:
@@ -618,8 +631,8 @@ class DuckDuckGoSearchProvider(BaseSearchProvider):
                 'no_html': 1,
                 'skip_disambig': 1
             }
-            
-            response = requests.get(url, params=params, timeout=10)
+
+            response = requests.get(url, params=params, timeout=10, proxies=_news_proxies())
             response.raise_for_status()
             data = response.json()
             
@@ -682,15 +695,15 @@ class DuckDuckGoSearchProvider(BaseSearchProvider):
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
             data = {'q': query}
-            
-            response = requests.post(url, headers=headers, data=data, timeout=10)
+
+            response = requests.post(url, headers=headers, data=data, timeout=10, proxies=_news_proxies())
             response.raise_for_status()
             
             results = []
             html = response.text
             
-            link_pattern = r'<a[^>]*class="result-link"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>'
-            snippet_pattern = r'<td[^>]*class="result-snippet"[^>]*>([^<]*)</td>'
+            link_pattern = r'<a[^>]*href="([^"]*)"[^>]*class=[\'"]result-link[\'"][^>]*>([^<]*)</a>'
+            snippet_pattern = r'<td[^>]*class=[\'"]result-snippet[\'"][^>]*>(.*?)</td>'
             
             links = re.findall(link_pattern, html)
             snippets = re.findall(snippet_pattern, html)
