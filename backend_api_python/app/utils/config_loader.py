@@ -21,6 +21,28 @@ logger = get_logger(__name__)
 # Config cache.
 _config_cache: Optional[Dict[str, Any]] = None
 _env_loaded = False
+# mtime (or None if missing) of each .env file at last load, used to detect
+# settings edits so every gunicorn worker refreshes independently.
+_env_mtimes: Optional[Dict[str, Optional[float]]] = None
+
+# Keys that belong to the process group (Docker/systemd), not the mutable
+# settings file. Rotating these in just one worker breaks the others.
+_PROCESS_OWNED_ENV_KEYS = (
+    "SECRET_KEY",
+    "CREDENTIAL_ENCRYPTION_KEY",
+    "QD_PROCESS_ROLE",
+    "STRATEGY_COMMANDS_ENABLED",
+)
+
+
+def _env_paths():
+    backend_dir = Path(__file__).resolve().parents[2]
+    root_dir = backend_dir.parent
+    return (root_dir / ".env", backend_dir / ".env")
+
+
+def _current_env_mtimes() -> Dict[str, Optional[float]]:
+    return {str(p): (p.stat().st_mtime if p.exists() else None) for p in _env_paths()}
 
 
 def _load_env_files_once() -> None:
@@ -35,15 +57,30 @@ def _load_env_files_once() -> None:
         logger.debug(f"python-dotenv unavailable; using process env only: {e}")
         return
 
-    backend_dir = Path(__file__).resolve().parents[2]
-    root_dir = backend_dir.parent
-    for env_path in (root_dir / ".env", backend_dir / ".env"):
+    for env_path in _env_paths():
         if env_path.exists():
             # Container/orchestrator environment is authoritative. In
             # particular, process-role variables must not be replaced by a
             # developer .env file or the API process can silently fall back to
             # the legacy in-process trading runtime.
             load_dotenv(env_path, override=False)
+
+
+def _reload_env_files_from_disk() -> None:
+    """Re-read .env files into os.environ after they changed on disk, keeping
+    process-owned keys stable so all workers stay consistent."""
+    try:
+        from dotenv import load_dotenv
+    except Exception as e:
+        logger.debug(f"python-dotenv unavailable; cannot reload env: {e}")
+        return
+    saved = {k: os.environ.get(k) for k in _PROCESS_OWNED_ENV_KEYS if k in os.environ}
+    for env_path in _env_paths():
+        if env_path.exists():
+            load_dotenv(env_path, override=True)
+    for k, v in saved.items():
+        if v is not None:
+            os.environ[k] = v
 
 
 def load_addon_config() -> Dict[str, Any]:
@@ -55,12 +92,20 @@ def load_addon_config() -> Dict[str, Any]:
     Returns:
         Nested config dict (PHP-compatible shape)
     """
-    global _config_cache
-    
-    # Return cached config when available.
+    global _config_cache, _env_mtimes
+
+    current_mtimes = _current_env_mtimes()
     if _config_cache is not None:
-        return _config_cache
-    _load_env_files_once()
+        # Cached: refresh only when a .env file changed on disk since the last
+        # load. This way a settings edit is picked up by every gunicorn worker
+        # on its next config read, without a restart or cross-process signal.
+        if current_mtimes == _env_mtimes:
+            return _config_cache
+        _reload_env_files_from_disk()
+        _env_mtimes = current_mtimes
+    else:
+        _load_env_files_once()
+        _env_mtimes = current_mtimes
     
     config: Dict[str, Any] = {}
 
@@ -312,7 +357,8 @@ def get_internal_api_key() -> Optional[str]:
 
 def clear_config_cache():
     """Clear the configuration cache."""
-    global _config_cache, _env_loaded
+    global _config_cache, _env_loaded, _env_mtimes
     _config_cache = None
     _env_loaded = False
+    _env_mtimes = None
     logger.debug("Addon config cache cleared")
