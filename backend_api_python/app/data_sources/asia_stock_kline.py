@@ -107,7 +107,7 @@ def normalize_chart_timeframe(timeframe: str) -> str:
 
 def ak_a_code_from_tencent(tencent_code: str) -> str:
     c = (tencent_code or "").strip().lower()
-    if len(c) >= 8 and c[:2] in ("sh", "sz"):
+    if len(c) >= 8 and c[:2] in ("sh", "sz", "bj"):
         return c[2:]
     return c
 
@@ -199,8 +199,12 @@ def _td_symbol_and_exchange(tencent_code: str, is_hk: bool) -> tuple[str, str]:
             num = str(int(num)).zfill(4)
         return num, "HKEX"
     digits = c.lstrip("SHSZ")
-    if c.startswith("SH") or digits.startswith("6"):
+    if digits.startswith("BJ"):
+        digits = digits[2:]
+    if digits.startswith("6") or digits.startswith("900"):
         return digits, "SSE"
+    if digits.startswith(("920", "4", "8")):
+        return digits, "BSE"
     return digits, "SZSE"
 
 
@@ -335,11 +339,15 @@ def yf_symbol_from_tencent(tencent_code: str, is_hk: bool) -> str:
         return num + ".HK"
     if c.startswith("SH"):
         return c[2:] + ".SS"
+    if c.startswith("BJ"):
+        return c[2:] + ".BJ"
     if c.startswith("SZ"):
         return c[2:] + ".SZ"
     digits = c.lstrip("SHSZ")
-    if digits.startswith("6"):
+    if digits.startswith("6") or digits.startswith("900"):
         return digits + ".SS"
+    if digits.startswith(("920", "4", "8")):
+        return digits + ".BJ"
     return digits + ".SZ"
 
 

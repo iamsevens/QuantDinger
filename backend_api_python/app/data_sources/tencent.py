@@ -43,7 +43,11 @@ def normalize_cn_code(symbol: str) -> str:
         return f"SZ{s}"
 
     if s.isdigit() and len(s) == 6:
-        return ("SH" + s) if s.startswith("6") else ("SZ" + s)
+        if s.startswith("6") or s.startswith("900"):
+            return "SH" + s
+        if s.startswith("920") or s.startswith("4") or s.startswith("8"):
+            return "BJ" + s
+        return "SZ" + s
 
     return s
 

@@ -349,8 +349,10 @@ def fetch_twelvedata_earnings(tencent_code: str, is_hk: bool) -> Dict[str, Any]:
 def _eastmoney_a_em_symbol(tencent_code: str) -> str:
     c = ak_a_code_from_tencent(tencent_code)
     c = (c or "").zfill(6)
-    if c.startswith("6"):
+    if c.startswith("6") or c.startswith("900"):
         return "SH" + c
+    if c.startswith(("920", "4", "8")):
+        return "BJ" + c
     return "SZ" + c
 
 
