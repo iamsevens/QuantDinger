@@ -594,6 +594,11 @@ def fetch_cn_financial_indicators(tencent_code: str) -> Dict[str, Any]:
     except ImportError:
         logger.warning("akshare not installed, A-share financial data unavailable")
 
+    if not result:
+        # akshare crashed (e.g. TypeError on BSE 920xxx codes) or returned
+        # nothing — fall back to the Eastmoney datacenter REST API directly.
+        result = fetch_cn_financial_indicators_em_http(tencent_code)
+
     if result:
         logger.debug("A-share financial indicators for %s: %d fields", sym6, len(result))
     return result
@@ -661,6 +666,155 @@ def fetch_cn_financial_statements(tencent_code: str) -> Dict[str, Any]:
         pass
 
     return statements if statements else {}
+
+
+# ---------------------------------------------------------------------------
+# Eastmoney datacenter HTTP fallback (bypasses akshare)
+# ---------------------------------------------------------------------------
+# akshare's stock_profit_sheet_by_report_em / stock_balance_sheet_by_report_em
+# / stock_cash_flow_sheet_by_report_em crash with
+# "TypeError: 'NoneType' object is not subscriptable" on BSE codes like 920663
+# (akshare assumes a row that Eastmoney's API returns as empty for the new
+# 920xxx segments). The underlying Eastmoney datacenter REST API returns the
+# full statements, so we call it directly here. Every function is best-effort
+# and returns {} on failure so callers keep falling back.
+
+_EM_DC_BASE = "https://datacenter.eastmoney.com/securities/api/data/v1/get"
+_EM_REPORTS = {
+    "income": "RPT_DMSK_FN_INCOME",
+    "balance": "RPT_DMSK_FN_BALANCE",
+    "cashflow": "RPT_DMSK_FN_CASHFLOW",
+}
+
+
+def _em_dc_rows(report: str, sym6: str, limit: int = 8) -> list:
+    """Fetch the latest report rows for a symbol from Eastmoney datacenter."""
+    try:
+        params = {
+            "reportName": _EM_REPORTS[report],
+            "columns": "ALL",
+            "pageNumber": "1",
+            "pageSize": max(1, int(limit)),
+            "filter": f'(SECURITY_CODE="{sym6}")',
+            "sortColumns": "REPORT_DATE",
+            "sortTypes": "-1",
+        }
+        resp = requests.get(
+            _EM_DC_BASE,
+            params=params,
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://emweb.securities.eastmoney.com/"},
+            timeout=12,
+        )
+        resp.raise_for_status()
+        data = (resp.json().get("result") or {}).get("data") or []
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        logger.debug("Eastmoney DC %s failed %s: %s", report, sym6, e)
+        return []
+
+
+def _em_num(row: dict, key: str) -> Optional[float]:
+    try:
+        v = row.get(key)
+        if v is None or v == "":
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _em_same_period(rows: list, idx: int) -> Optional[dict]:
+    """
+    Return the row for the same reporting period one year earlier. The income
+    table is cumulative-per-period (Q1/H1/Q3/FY), so comparing adjacent rows
+    (e.g. Q1 vs FY) mixes scopes; YoY must match on REPORT_DATE's month/day.
+    """
+    if idx >= len(rows):
+        return None
+    cur = rows[idx]
+    try:
+        cur_d = str(cur.get("REPORT_DATE") or "")[:10]
+        if len(cur_d) != 10:
+            return None
+        md = cur_d[5:]  # MM-DD
+    except Exception:
+        return None
+    for r in rows[idx + 1:]:
+        d = str(r.get("REPORT_DATE") or "")
+        if len(d) >= 10 and d[5:10] == md:
+            return r
+    return None
+
+
+def fetch_cn_financial_indicators_em_http(tencent_code: str) -> Dict[str, Any]:
+    """
+    A-share growth/debt/FCF metrics straight from Eastmoney datacenter REST,
+    used when akshare crashes on BSE codes. Mirrors fetch_cn_financial_indicators
+    field names (revenue_growth, profit_margin, earnings_growth, debt_to_equity,
+    current_ratio, free_cash_flow, ...). Growth uses same-period YoY (Q1 vs Q1,
+    FY vs FY); current_ratio is returned as a fraction (Eastmoney sends percent).
+    """
+    sym6 = ak_a_code_from_tencent(tencent_code)
+    if not sym6:
+        return {}
+
+    result: Dict[str, Any] = {}
+
+    income = _em_dc_rows("income", sym6, 8)
+    if income:
+        cur = income[0]
+        prev = _em_same_period(income, 0)
+        rev_cur = _em_num(cur, "TOTAL_OPERATE_INCOME")
+        rev_prev = _em_num(prev, "TOTAL_OPERATE_INCOME") if prev else None
+        if rev_cur is not None:
+            if rev_prev is not None and rev_prev != 0:
+                result["revenue_growth"] = round((rev_cur - rev_prev) / abs(rev_prev) * 100, 2)
+            net_cur = _em_num(cur, "PARENT_NETPROFIT")
+            if net_cur is not None and rev_cur > 0:
+                result["profit_margin"] = round(net_cur / rev_cur * 100, 2)
+            op_profit = _em_num(cur, "OPERATE_PROFIT")
+            if op_profit is not None and rev_cur > 0:
+                result["operating_margin"] = round(op_profit / rev_cur * 100, 2)
+            if net_cur is not None:
+                net_prev = _em_num(prev, "PARENT_NETPROFIT") if prev else None
+                if net_prev is not None and net_prev != 0:
+                    result["earnings_growth"] = round((net_cur - net_prev) / abs(net_prev) * 100, 2)
+
+    balance = _em_dc_rows("balance", sym6, 2)
+    if balance:
+        b0 = balance[0]
+        total_debt = _em_num(b0, "TOTAL_LIABILITIES")
+        total_equity = _em_num(b0, "TOTAL_EQUITY")
+        if total_debt is not None and total_equity and total_equity > 0:
+            result["debt_to_equity"] = round(total_debt / total_equity, 4)
+        cr = _em_num(b0, "CURRENT_RATIO")
+        if cr is not None:
+            result["current_ratio"] = round(cr / 100, 4)  # Eastmoney sends percent
+        total_assets = _em_num(b0, "TOTAL_ASSETS")
+        if total_assets is not None:
+            result["total_assets"] = total_assets
+        if total_debt is not None:
+            result["total_debt"] = total_debt
+
+    cashflow = _em_dc_rows("cashflow", sym6, 2)
+    if cashflow:
+        c0 = cashflow[0]
+        op_cf = _em_num(c0, "NETCASH_OPERATE")
+        capex = _em_num(c0, "CONSTRUCT_LONG_ASSET")
+        if op_cf is not None:
+            result["operating_cash_flow"] = op_cf
+            if capex is not None:
+                result["free_cash_flow"] = round(op_cf - abs(capex), 2)
+        inv_cf = _em_num(c0, "NETCASH_INVEST")
+        fin_cf = _em_num(c0, "NETCASH_FINANCE")
+        if inv_cf is not None:
+            result["investing_cash_flow"] = inv_cf
+        if fin_cf is not None:
+            result["financing_cash_flow"] = fin_cf
+
+    if result:
+        logger.debug("Eastmoney HTTP financial indicators for %s: %d fields", sym6, len(result))
+    return result
 
 
 def fetch_hk_financial_indicators(tencent_code: str) -> Dict[str, Any]:
