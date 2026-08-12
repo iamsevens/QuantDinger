@@ -38,6 +38,12 @@ Notification configuration:
 - [Telegram (English)](deployment/NOTIFICATION_TELEGRAM_CONFIG_EN.md) /
   [Telegram（中文）](deployment/NOTIFICATION_TELEGRAM_CONFIG_CN.md)
 
+## User guide
+
+| Document | Purpose |
+| --- | --- |
+| [前端操作指南](USER_GUIDE_CN.md) | PC 前端七大顶部菜单操作指南（从编译产物反查，含具体按钮、字段、流程）。 |
+
 ## Trading and research
 
 | Document | Purpose |
